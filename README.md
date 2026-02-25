@@ -9,6 +9,8 @@ We prototype in AI chat, then move to code. The gap between "conversation with w
 | Skill | What it does |
 |-------|-------------|
 | [ingest-chat](skills/ingest-chat/) | Extract conversation context from a Claude share link and scaffold a project |
+| [repo-topics](skills/repo-topics/) | Suggest and set GitHub repository topics based on what the project actually is |
+| [repo-description](skills/repo-description/) | Suggest and set a GitHub repository description in one clear line |
 
 ## Installing a Skill
 
