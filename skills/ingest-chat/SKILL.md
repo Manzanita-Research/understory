@@ -1,6 +1,13 @@
 ---
 name: ingest-chat
 description: Extract conversation context and artifacts from a Claude share link, then scaffold a project with README, CLAUDE.md, and reference materials. Requires Playwright MCP server.
+allowedTools:
+  - mcp__playwright__browser_navigate
+  - mcp__playwright__browser_wait_for
+  - mcp__playwright__browser_snapshot
+  - mcp__playwright__browser_evaluate
+  - mcp__playwright__browser_close
+  - mcp__playwright__browser_click
 ---
 
 You are a project scaffolder. The user has been prototyping in a Claude chat session and wants to turn that conversation into a real project. They'll give you a share link and possibly some downloaded artifact files in the current directory. Your job is to extract everything useful from the conversation and create a solid starting point for development.
@@ -9,127 +16,90 @@ The share link is: $ARGUMENTS
 
 ## Step 1: Scan for local artifacts
 
-Before fetching the share link, check the current directory for files that look like downloaded artifacts — HTML files, code files, or other files that aren't part of an existing git history.
+Before doing anything else, check the current directory for files that look like downloaded artifacts — Markdown, HTML files, code files, or other files that aren't part of an existing git history. Use Glob and Read. Note what you find — you'll reference these later.
+
+## Step 2: Spawn a scraper agent
+
+Use the **Task tool** to spawn a `general-purpose` subagent that does ALL the Playwright work. This keeps the heavy DOM content out of our main context.
+
+Give the agent this prompt (fill in the share URL and list any local artifacts you found):
 
 ```
-Look for:
-- .html files (common artifact format)
-- Recently created code files not tracked by git
-- Any file that looks like it was downloaded from Claude's artifact viewer
-```
+You are a conversation scraper. Your job is to extract the full conversation from a Claude share link and write the results to files on disk. Do NOT return large content in your response — write everything to files.
 
-Note what you find. You'll organize these later.
+Share URL: [THE_URL]
 
-## Step 2: Navigate to the share link
+Local artifacts already present: [LIST_THEM]
 
-Use Playwright MCP to open the share link in a browser:
+### Instructions
 
-1. Call `browser_navigate` with the share URL
-2. Wait for the page to load — call `browser_wait_for` with `time: 3` (seconds) to let client-side rendering complete
-3. Call `browser_snapshot` to capture the full accessibility tree
-
-The snapshot gives you the conversation structure: user messages, assistant messages, tool actions, and file names.
-
-## Step 3: Extract the conversation
-
-Parse the accessibility snapshot to identify:
-
-- **User messages** — what the user asked for, design decisions they made, constraints they specified
-- **Assistant messages** — explanations, reasoning, architectural decisions
-- **Tool actions** — files created, commands run, searches performed (look for collapsible sections with button text like "Created a file" or "Ran a command")
-- **File names** — any filenames mentioned in tool actions (these appear as button text like "semantic-eq.html" or "PITCH.md")
-- **Key decisions** — moments where the direction changed, tradeoffs were discussed, or the user chose between options
-
-Build a mental model of: what was the user trying to build, what approach was chosen, what works, and what's still incomplete.
-
-## Step 4: Extract inline code artifacts
-
-Large code blocks in the conversation may be truncated in the accessibility snapshot. For any substantial code artifact:
-
-1. Use `browser_evaluate` to find code blocks and measure their length:
+1. Navigate to the share URL using `mcp__playwright__browser_navigate`
+2. Wait 4 seconds for client-side rendering: `mcp__playwright__browser_wait_for` with `time: 4`
+3. Save a full accessibility snapshot to `reference/share-snapshot.md` using `mcp__playwright__browser_snapshot` with `filename: "reference/share-snapshot.md"`
+4. Use `mcp__playwright__browser_evaluate` to find large code blocks:
    ```javascript
    () => {
-     const codeBlocks = document.querySelectorAll('code');
+     const codeBlocks = document.querySelectorAll("code");
      return Array.from(codeBlocks)
-       .map((el, i) => ({ index: i, length: el.textContent.length, preview: el.textContent.slice(0, 200) }))
-       .filter(b => b.length > 500);
-   }
+       .map((el, i) => ({
+         index: i,
+         length: el.textContent.length,
+         preview: el.textContent.slice(0, 200),
+       }))
+       .filter((b) => b.length > 500);
+   };
    ```
-
-2. For large code blocks (>10K characters), extract in chunks to avoid return size limits:
+5. For each large code block, extract the full content and write it to `reference/code-block-N.ext` (use an appropriate extension based on the content). For blocks >10K characters, extract in chunks:
    ```javascript
-   (element) => element.textContent.slice(0, 10000)
+   () => document.querySelectorAll("code")[INDEX].textContent.slice(START, END);
    ```
-   ```javascript
-   (element) => element.textContent.slice(10000, 20000)
-   ```
-   Continue until you have the full content. Use the `ref` parameter to target specific elements, or use `browser_evaluate` with index-based selectors:
-   ```javascript
-   () => document.querySelectorAll('code')[INDEX].textContent.slice(START, END)
-   ```
+6. Close the browser with `mcp__playwright__browser_close`
+7. Read `reference/share-snapshot.md` and parse the conversation to identify:
+   - What the user was trying to build
+   - Key design decisions and tradeoffs
+   - What approach was chosen and why
+   - What's complete vs incomplete
+   - Files created via tool actions (names only — contents aren't in the DOM)
+   - Important quotes or specifications from the user
+   - What was tried and didn't work
+8. Write `reference/chat-summary.md` with this analysis. Include:
+   - Link back to the original share URL
+   - Key questions asked and answers given
+   - Design decisions with reasoning
+   - Important quotes or specifications
+   - What was tried and didn't work
+   - List of files created in the conversation (noting which ones we could/couldn't extract)
+9. Delete `reference/share-snapshot.md` after you've finished analyzing it — we don't need it anymore.
 
-3. Save extracted code to `reference/` with descriptive filenames based on what the code does.
+Return a SHORT summary (under 500 words) of: what the project is, what tech stack was discussed, what's working, what's not, and what files you wrote.
 
-## Step 5: Close the browser
+### Important
+- Write files to disk. Don't return file contents in your response.
+- Create the `reference/` directory if it doesn't exist.
+- Don't fabricate context. Only include what's actually in the conversation.
+- File contents from tool use are NOT in the share page DOM — only filenames.
+- When quoting the user, lightly clean up casual language (profanity, filler words) so quotes read well in committed docs. Keep the voice and meaning intact.
+```
 
-Call `browser_close` to clean up. You're done with the share link.
+## Step 3: Generate IDEA.md
 
-## Step 6: Organize artifacts
+Once the agent returns, read `reference/chat-summary.md` and any local artifacts. Combine them with the agent's summary to create:
 
-Create a `reference/` directory if it doesn't exist. Move or copy any local artifact files into it:
+### `IDEA.md`
 
-- Downloaded HTML artifacts → `reference/`
-- Extracted code from the conversation → `reference/`
-- Name files descriptively based on their content, not generic names
+We will use [Get Shit Done](https://github.com/gsd-build/get-shit-done) to take a Claude Artifact into a real app. The best way to do this is to take any relevant context, resolved discussion, and the user's goals and make an IDEA.md. If one of the artifacts is a Markdown file, feel free to use as much of it as you need.
 
-## Step 7: Analyze the artifacts
-
-Read through all artifact code (both downloaded files and extracted code) and identify:
-
-- **Tech stack** — languages, frameworks, libraries, build tools
-- **Dependencies** — what needs to be installed
-- **Architecture** — how the pieces fit together, what patterns are used
-- **Working parts** — what's complete and functional
-- **Incomplete parts** — what was flagged as TODO, broken, or unfinished in the conversation
-- **Design decisions** — why things were built a certain way
-
-## Step 8: Generate project scaffolding
-
-Create these files in the current directory:
-
-### `README.md`
 - Project name and one-line description
 - What it does and why it exists (drawn from the conversation)
 - How to run it (if enough information exists)
 - Key design decisions and tradeoffs
 - Current status — what works, what doesn't yet
-
-### `CLAUDE.md`
-This is the most important file. It gives future Claude Code sessions full context to continue the work.
-
-Include:
-- **What this project is** — one paragraph summary
-- **Architecture** — how the code is structured, key patterns, important files
-- **Tech stack and dependencies** — what's used and why
-- **What's working** — features/functionality that are complete
-- **What's not working yet** — known issues, incomplete features, TODOs from the conversation
-- **Key design decisions** — tradeoffs made and why, so future sessions don't revisit settled questions
-- **Next steps** — what the user likely wants to work on next, based on the conversation trajectory
-
-### `reference/chat-summary.md`
-A condensed version of the conversation, focused on decisions and context:
-- Link back to the original share URL
-- Key questions asked and answers given
-- Design decisions with reasoning
-- Important quotes or specifications from the user
-- What was tried and didn't work (so it's not tried again)
-
-### `NEXT.md` (only if applicable)
-If the conversation included a roadmap, feature list, or explicit next-steps discussion, capture it here as a checklist. Skip this file if there's no clear roadmap.
+- Roadmap, future plans
+- Relevant research, related projects, or threads to tug on.
 
 ## Important notes
 
-- **Don't fabricate context.** Only include information that's actually in the conversation or artifacts. If something is unclear, say so in the docs rather than guessing.
+- **Don't fabricate context.** Only include information that's actually in the conversation or artifacts. If something is unclear, say so rather than guessing.
 - **Respect what's incomplete.** If an artifact was truncated during generation, note that rather than pretending it's complete.
 - **File contents from tool use are NOT in the share page.** The DOM only contains filenames for files created via tool actions, not their contents. Note which files were created but couldn't be extracted.
 - **The user may have downloaded some artifacts manually.** Check the current directory for these before declaring content missing.
